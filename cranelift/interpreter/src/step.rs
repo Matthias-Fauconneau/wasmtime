@@ -12,6 +12,9 @@ use smallvec::{smallvec, SmallVec};
 use std::ops::RangeFrom;
 use thiserror::Error;
 
+pub type Extension<V> = fn(_id: u32, _arguments: &[V]) -> ValueResult<V>;
+pub fn no_extension<V>(_id: u32, _arguments: &[V]) -> ValueResult<V> { unreachable!() }
+
 /// Interpret a single Cranelift instruction. Note that program traps and interpreter errors are
 /// distinct: a program trap results in `Ok(Flow::Trap(...))` whereas an interpretation error (e.g.
 /// the types of two values are incompatible) results in `Err(...)`.
@@ -19,6 +22,7 @@ use thiserror::Error;
 pub fn step<'a, V, I>(
     state: &mut dyn State<'a, V>,
     inst_context: I,
+    extension: Extension<V>,
 ) -> Result<ControlFlow<'a, V>, StepError>
 where
     V: Value,
@@ -160,10 +164,11 @@ where
         Opcode::FallthroughReturn => ControlFlow::Return(args()?),
         Opcode::Call => {
             if let InstructionData::Call { func_ref, .. } = inst {
-                let function = state
-                    .get_function(func_ref)
-                    .ok_or(StepError::UnknownFunction(func_ref))?;
-                ControlFlow::Call(function, args()?)
+                if let Ok(value) = extension(func_ref.as_u32(), &args()?) {
+									assign(value)
+								} else {
+									ControlFlow::Call(state.get_function(func_ref).ok_or(StepError::UnknownFunction(func_ref))?, args()?)
+								}
             } else {
                 unreachable!()
             }
@@ -470,13 +475,10 @@ where
             }
             ControlFlow::Continue
         }
-        Opcode::Fadd => binary(Value::add, arg(0)?, arg(1)?)?,
-        Opcode::Fsub => binary(Value::sub, arg(0)?, arg(1)?)?,
-        Opcode::Fmul => binary(Value::mul, arg(0)?, arg(1)?)?,
-        Opcode::Fdiv => binary(Value::div, arg(0)?, arg(1)?)?,
+        op @ (Opcode::Fadd|Opcode::Fsub|Opcode::Fmul|Opcode::Fdiv) => assign(Value::binary(arg(0)?, op, arg(1)?)?),
         Opcode::Sqrt => unimplemented!("Sqrt"),
         Opcode::Fma => unimplemented!("Fma"),
-        Opcode::Fneg => binary(Value::sub, Value::float(0, ctrl_ty)?, arg(0)?)?,
+        Opcode::Fneg => assign(Value::binary(Value::float(0, ctrl_ty)?, Opcode::Fsub, arg(0)?)?),
         Opcode::Fabs => unimplemented!("Fabs"),
         Opcode::Fcopysign => unimplemented!("Fcopysign"),
         Opcode::Fmin => choose(

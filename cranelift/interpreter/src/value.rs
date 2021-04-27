@@ -6,7 +6,7 @@ use core::convert::TryFrom;
 use core::fmt::{self, Display, Formatter};
 use cranelift_codegen::data_value::DataValue;
 use cranelift_codegen::ir::immediates::{Ieee32, Ieee64};
-use cranelift_codegen::ir::{types, Type};
+use cranelift_codegen::ir::{types, Type, Opcode};
 use thiserror::Error;
 
 pub type ValueResult<T> = Result<T, ValueError>;
@@ -23,6 +23,9 @@ pub trait Value: Clone + From<DataValue> {
     fn into_bool(self) -> ValueResult<bool>;
     fn vector(v: [u8; 16], ty: Type) -> ValueResult<Self>;
     fn convert(self, kind: ValueConversionKind) -> ValueResult<Self>;
+
+    // Generic binary
+    fn binary(self, op: Opcode, other: Self) -> ValueResult<Self>;
 
     // Comparison.
     fn eq(&self, other: &Self) -> ValueResult<bool>;
@@ -122,7 +125,7 @@ macro_rules! binary_match {
     ( $op:tt($arg1:expr, $arg2:expr); [ $( $data_value_ty:ident ),* ] ) => {
         match ($arg1, $arg2) {
             $( (DataValue::$data_value_ty(a), DataValue::$data_value_ty(b)) => { Ok(DataValue::$data_value_ty(a $op b)) } )*
-            _ => unimplemented!()
+            (a,b) => panic!("{:?} {:?}", a, b)
         }
     };
     ( $op:tt($arg1:expr, $arg2:expr); unsigned integers ) => {
@@ -207,6 +210,7 @@ impl Value for DataValue {
         Ok(match kind {
             ValueConversionKind::Exact(ty) => match (self, ty) {
                 // TODO a lot to do here: from bmask to ireduce to raw_bitcast...
+                (DataValue::I64(n), types::I64) => DataValue::I64(n),
                 (DataValue::I64(n), types::I32) => DataValue::I32(i32::try_from(n)?),
                 (DataValue::B(b), t) if t.is_bool() => DataValue::B(b),
                 (dv, _) => unimplemented!("conversion: {} -> {:?}", dv.ty(), kind),
@@ -257,6 +261,25 @@ impl Value for DataValue {
                 _ => unimplemented!("conversion: {} -> {:?}", self.ty(), kind),
             },
         })
+    }
+
+    fn binary(self, op: Opcode, other: Self) -> ValueResult<Self> {
+			use DataValue::*;
+			match (self, other) {
+				(F64(a), F64(b)) => Ok(F64(Ieee64::/*from*/with_float((|a: f64, b: f64|{
+					use Opcode::*;
+					let result = match op {
+						Fadd => a+b,
+						Fsub => a-b,
+						Fmul => a*b,
+						Fdiv => a/b,
+						_ => unimplemented!(),
+					};
+					assert!(result.is_finite(), "{} {} {} = {}", a, op, b, result);
+					result
+				})(f64::from_bits(a.bits()), f64::from_bits(b.bits()))))),
+				(a, b) => panic!("{:?} {:?}", a, b),
+			}
     }
 
     fn eq(&self, other: &Self) -> ValueResult<bool> {

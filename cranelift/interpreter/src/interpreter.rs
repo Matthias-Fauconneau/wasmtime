@@ -6,7 +6,7 @@ use crate::environment::{FuncIndex, FunctionStore};
 use crate::frame::Frame;
 use crate::instruction::DfgInstructionContext;
 use crate::state::{MemoryError, State};
-use crate::step::{step, ControlFlow, StepError};
+use crate::step::{step, ControlFlow, StepError, Extension, no_extension};
 use crate::value::ValueError;
 use cranelift_codegen::data_value::DataValue;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -20,13 +20,13 @@ use thiserror::Error;
 /// flow. The interpreter state is defined separately (see [InterpreterState]) as the execution
 /// semantics for each Cranelift instruction (see [step]).
 pub struct Interpreter<'a> {
-    state: InterpreterState<'a>,
+    pub state: InterpreterState<'a>,
+    extension: Extension<DataValue>,
 }
 
 impl<'a> Interpreter<'a> {
-    pub fn new(state: InterpreterState<'a>) -> Self {
-        Self { state }
-    }
+    pub fn new(state: InterpreterState<'a>) -> Self { Self { state, extension: no_extension::<DataValue> } }
+		pub fn with_extension(state: InterpreterState<'a>, extension: Extension<DataValue>) -> Self { Self { state, extension } }
 
     /// Call a function by name; this is a helpful proxy for [Interpreter::call_by_index].
     pub fn call_by_name(
@@ -55,7 +55,7 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Interpret a call to a [Function] given its [DataValue] arguments.
-    fn call(
+    pub fn call(
         &mut self,
         function: &'a Function,
         arguments: &[DataValue],
@@ -83,7 +83,7 @@ impl<'a> Interpreter<'a> {
         let mut maybe_inst = layout.first_inst(block);
         while let Some(inst) = maybe_inst {
             let inst_context = DfgInstructionContext::new(inst, &function.dfg);
-            match step(&mut self.state, inst_context)? {
+            match step(&mut self.state, inst_context, self.extension)? {
                 ControlFlow::Assign(values) => {
                     self.state
                         .current_frame_mut()
@@ -217,8 +217,8 @@ impl<'a> State<'a, DataValue> for InterpreterState<'a> {
     }
 
     fn load_heap(&self, offset: usize, ty: Type) -> Result<DataValue, MemoryError> {
-        if offset + 16 < self.heap.len() {
-            let pointer = self.heap[offset..offset + 16].as_ptr() as *const _ as *const u128;
+        if offset + (ty.bytes() as usize) <= self.heap.len() {
+            let pointer = self.heap[offset..offset + ty.bytes() as usize].as_ptr() as *const _ as *const u128;
             Ok(unsafe { DataValue::read_value_from(pointer, ty) })
         } else {
             Err(MemoryError::InsufficientMemory(offset, self.heap.len()))
@@ -226,8 +226,8 @@ impl<'a> State<'a, DataValue> for InterpreterState<'a> {
     }
 
     fn store_heap(&mut self, offset: usize, v: DataValue) -> Result<(), MemoryError> {
-        if offset + 16 < self.heap.len() {
-            let pointer = self.heap[offset..offset + 16].as_mut_ptr() as *mut _ as *mut u128;
+        if offset + (v.ty().bytes() as usize) <= self.heap.len() {
+            let pointer = self.heap[offset..offset + v.ty().bytes() as usize].as_mut_ptr() as *mut _ as *mut u128;
             Ok(unsafe { v.write_value_to(pointer) })
         } else {
             Err(MemoryError::InsufficientMemory(offset, self.heap.len()))
@@ -287,7 +287,7 @@ mod tests {
             v1 = iadd_imm v0, -1
             return v1
         }
-        
+
         function %parent(i32) -> i32 {
             fn42 = %child(i32) -> i32
         block0(v0: i32):
